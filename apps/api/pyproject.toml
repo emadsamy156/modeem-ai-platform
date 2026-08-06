@@ -1,0 +1,24 @@
+[project]
+name = "modeem-ai-api"
+version = "0.1.0"
+description = "Modeem AI Platform API — foundation phase"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic>=2",
+    "pydantic-settings",
+    "sqlalchemy>=2",
+    "alembic",
+    "psycopg2-binary",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx", "ruff"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
