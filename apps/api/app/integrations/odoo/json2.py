@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from .errors import ConnectorError
-from .http import check_response_size
+from .http import post_limited
 
 transport = "json2"
 
@@ -37,7 +37,7 @@ def _post(
 ) -> httpx.Response:
     url = f"{base_url}/json/2/{model}/{method}"
     try:
-        return client.post(url, json=payload, headers=_headers(api_key, database))
+        return post_limited(client, url, json=payload, headers=_headers(api_key, database))
     except (httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
         raise ConnectorError("connection_timeout") from exc
     except httpx.ConnectError as exc:
@@ -72,7 +72,6 @@ def probe_auth(
         raise ConnectorError("server_unreachable")
     if response.status_code != 200:
         raise ConnectorError("unsupported_response", f"status {response.status_code}")
-    check_response_size(response)
     try:
         body = response.json()
     except ValueError as exc:

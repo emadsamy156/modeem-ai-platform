@@ -28,8 +28,38 @@ def build_client() -> httpx.Client:
     )
 
 
-def check_response_size(response: httpx.Response) -> None:
+def post_limited(
+    client: httpx.Client,
+    url: str,
+    *,
+    content: bytes | None = None,
+    json: dict | list | None = None,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    """POST and read the response as a stream, enforcing the byte cap while
+    iterating chunks. The connection is aborted as soon as the cap is
+    exceeded — the body is never fully buffered first."""
     from .errors import ConnectorError
 
-    if len(response.content) > MAX_PROBE_RESPONSE_BYTES:
-        raise ConnectorError("unsupported_response", "probe response too large")
+    with client.stream(
+        "POST", url, content=content, json=json, headers=headers
+    ) as response:
+        declared = response.headers.get("Content-Length")
+        if (
+            declared is not None
+            and declared.isdigit()
+            and int(declared) > MAX_PROBE_RESPONSE_BYTES
+        ):
+            raise ConnectorError("unsupported_response", "probe response too large")
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in response.iter_bytes():
+            total += len(chunk)
+            if total > MAX_PROBE_RESPONSE_BYTES:
+                raise ConnectorError(
+                    "unsupported_response", "probe response too large"
+                )
+            chunks.append(chunk)
+    # Attach the size-capped body so callers can use response.content/.json().
+    response._content = b"".join(chunks)
+    return response

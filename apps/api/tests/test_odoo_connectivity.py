@@ -322,6 +322,65 @@ def test_timeout_maps_to_safe_error(allow_outbound, monkeypatch):
     assert out.error_code == "connection_timeout"
 
 
+def test_oversized_xmlrpc_stream_halted_at_cap(allow_outbound, monkeypatch):
+    """Chunked oversized response (no Content-Length) must be aborted at the
+    byte cap while streaming — never fully buffered."""
+    served = {"chunks": 0}
+
+    def endless():
+        chunk = b"x" * 65536
+        while True:
+            served["chunks"] += 1
+            yield chunk
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=endless())
+
+    monkeypatch.setattr(safe_http, "build_client", lambda: _mock_client(handler))
+    out = _run_test()
+    assert out.success is False
+    assert out.error_code == "unsupported_response"
+    # Halted right past 1 MB (~16 chunks), not after gigabytes.
+    assert served["chunks"] < 32
+
+
+def test_oversized_json2_stream_halted_at_cap(allow_outbound, monkeypatch):
+    served = {"chunks": 0}
+
+    def endless():
+        chunk = b"j" * 65536
+        while True:
+            served["chunks"] += 1
+            yield chunk
+
+    base = _make_handler(major=19)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/json/2/" in str(request.url):
+            return httpx.Response(200, content=endless())
+        return base(request)
+
+    monkeypatch.setattr(safe_http, "build_client", lambda: _mock_client(handler))
+    out = _run_test(auth_mode="api_key", secret="valid-api-key")
+    assert out.success is False
+    assert out.error_code in SAFE_ERROR_CODES
+    assert served["chunks"] < 32
+
+
+def test_declared_oversized_content_length_rejected_before_read(
+    allow_outbound, monkeypatch
+):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, headers={"Content-Length": str(50_000_000)}, content=b""
+        )
+
+    monkeypatch.setattr(safe_http, "build_client", lambda: _mock_client(handler))
+    out = _run_test()
+    assert out.success is False
+    assert out.error_code == "unsupported_response"
+
+
 # --- Endpoint tests (13-19, 30-32) ----------------------------------------------------
 
 

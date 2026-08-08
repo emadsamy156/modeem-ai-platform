@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 
 from .errors import ConnectorError
-from .http import check_response_size
+from .http import post_limited
 from .schemas import OdooVersionInfo
 
 transport = "xmlrpc"
@@ -30,7 +30,7 @@ def _call(
     payload = xmlrpc.client.dumps(params, methodname=method, allow_none=False)
     url = f"{base_url}/xmlrpc/2/{endpoint}"
     try:
-        response = client.post(url, content=payload.encode("utf-8"), headers=_XML_HEADERS)
+        response = post_limited(client, url, content=payload.encode("utf-8"), headers=_XML_HEADERS)
     except httpx.ConnectTimeout as exc:
         raise ConnectorError("connection_timeout") from exc
     except httpx.ReadTimeout as exc:
@@ -50,7 +50,6 @@ def _call(
         raise ConnectorError("unsupported_response", "redirect")
     if response.status_code != 200:
         raise ConnectorError("not_odoo", f"status {response.status_code}")
-    check_response_size(response)
     try:
         result, _ = xmlrpc.client.loads(response.text)
     except xmlrpc.client.Fault as fault:
