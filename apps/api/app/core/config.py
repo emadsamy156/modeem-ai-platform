@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     session_secret: str = ""
     session_ttl_seconds: int = 60 * 60 * 12  # 12 hours
 
+    # Connections (Phase 2B): AES-256-GCM key, URL-safe Base64 of 32 random
+    # bytes. MUST be independent of AUTH_SECRET / SESSION_SECRET — never
+    # derived from or defaulted to them. In development, connection
+    # operations fail clearly until this is configured.
+    connection_encryption_key: str = ""
+
     # Bootstrap admin (development convenience; never commit real values).
     bootstrap_admin_email: str = ""
     bootstrap_admin_password: str = ""
@@ -44,4 +50,11 @@ def get_settings() -> Settings:
     from app.core.security import validate_auth_secret_for_production
 
     validate_auth_secret_for_production(settings.environment, settings.auth_secret)
+
+    if settings.environment == "production":
+        from app.services.credential_crypto import validate_encryption_key
+
+        # Fail startup clearly if the key is missing or malformed. Never
+        # log or include the key value itself.
+        validate_encryption_key(settings.connection_encryption_key)
     return settings
