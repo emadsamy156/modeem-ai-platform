@@ -19,9 +19,29 @@ class Settings(BaseSettings):
     # Redis-ready configuration (no worker implementation in this phase).
     redis_url: str = "redis://localhost:6379/0"
 
+    # Authentication (Phase 2A). AUTH_SECRET must come from the environment.
+    # Falls back to SESSION_SECRET (provided by the hosting environment) so
+    # development works without duplicating secrets. Never hardcode a value.
+    auth_secret: str = ""
+    session_secret: str = ""
+    session_ttl_seconds: int = 60 * 60 * 12  # 12 hours
+
+    # Bootstrap admin (development convenience; never commit real values).
+    bootstrap_admin_email: str = ""
+    bootstrap_admin_password: str = ""
+    bootstrap_tenant_name: str = ""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    if settings.environment != "production" and not settings.auth_secret:
+        # Development convenience only; production requires explicit AUTH_SECRET.
+        settings.auth_secret = settings.session_secret
+
+    from app.core.security import validate_auth_secret_for_production
+
+    validate_auth_secret_for_production(settings.environment, settings.auth_secret)
+    return settings
