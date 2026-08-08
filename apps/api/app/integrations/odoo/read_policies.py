@@ -78,8 +78,45 @@ _COUNTRIES = ReadPolicy(
     max_page_size=ABSOLUTE_MAX_PAGE_SIZE,
 )
 
+# Phase 2F: first real business resource — a privacy-reviewed SUMMARY
+# subset of the Modeem BMS beneficiary model (modeem.bms.beneficiary,
+# Odoo 16 module). ONLY the five approved fields exist here; sensitive
+# fields (id_type, id_number, birth_date, age, phone_number, nationality,
+# gender, family_id, family_member_ids, relationship_type,
+# beneficiary_type, support_ids, active, audit/avatar fields) are
+# deliberately ABSENT and must go through explicit privacy review before
+# ever being added. Filters are allowed only on id/name/is_family (not on
+# financial totals) and ordering only on id/name.
+_BENEFICIARIES_SUMMARY = ReadPolicy(
+    resource_key="beneficiaries_summary",
+    odoo_model="modeem.bms.beneficiary",
+    fields=_fields(
+        ReadFieldPolicy(name="id", value_type="integer", nullable=False),
+        ReadFieldPolicy(name="name", value_type="string", nullable=False, max_length=255),
+        ReadFieldPolicy(name="is_family", value_type="boolean", nullable=False),
+        ReadFieldPolicy(
+            name="total_draft_supports", value_type="number", nullable=False
+        ),
+        ReadFieldPolicy(
+            name="total_paid_supports", value_type="number", nullable=False
+        ),
+    ),
+    default_fields=(
+        "id",
+        "name",
+        "is_family",
+        "total_draft_supports",
+        "total_paid_supports",
+    ),
+    allowed_filter_fields=frozenset({"id", "name", "is_family"}),
+    allowed_filter_operators=SAFE_OPERATORS,
+    allowed_order_fields=frozenset({"id", "name"}),
+    max_page_size=ABSOLUTE_MAX_PAGE_SIZE,
+)
+
 READ_POLICIES: dict[str, ReadPolicy] = {
     _COUNTRIES.resource_key: _COUNTRIES,
+    _BENEFICIARIES_SUMMARY.resource_key: _BENEFICIARIES_SUMMARY,
 }
 
 

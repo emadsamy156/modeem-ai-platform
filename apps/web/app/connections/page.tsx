@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useAuth } from "@/components/auth-provider";
 import { Header } from "@/components/header";
@@ -26,7 +26,16 @@ type ConnectionOut = {
   updated_at: string;
 };
 
-type PreviewRecord = { id?: number; name?: string; code?: string };
+type PreviewResource = "countries" | "beneficiaries_summary";
+
+type PreviewRecord = {
+  id?: number;
+  name?: string;
+  code?: string;
+  is_family?: boolean;
+  total_draft_supports?: number;
+  total_paid_supports?: number;
+};
 
 type PreviewPage = {
   resource: string;
@@ -86,11 +95,15 @@ export default function ConnectionsPage() {
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, TestResult>>({});
   const [previewConn, setPreviewConn] = useState<ConnectionOut | null>(null);
+  const [previewResource, setPreviewResource] = useState<PreviewResource>("countries");
   const [previewPage, setPreviewPage] = useState<PreviewPage | null>(null);
   const [previewLimit, setPreviewLimit] = useState(25);
   const [previewOffset, setPreviewOffset] = useState(0);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState(false);
+  // Guards against out-of-order preview responses (e.g. switching
+  // resource while a slower previous request is still in flight).
+  const previewReqRef = useRef(0);
 
   const load = useCallback(async () => {
     try {
@@ -207,7 +220,13 @@ export default function ConnectionsPage() {
     }
   };
 
-  const loadPreview = async (c: ConnectionOut, limit: number, offset: number) => {
+  const loadPreview = async (
+    c: ConnectionOut,
+    limit: number,
+    offset: number,
+    resource: PreviewResource,
+  ) => {
+    const reqId = ++previewReqRef.current;
     setPreviewLoading(true);
     setPreviewError(false);
     try {
@@ -215,23 +234,35 @@ export default function ConnectionsPage() {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json", ...csrfHeaders() },
-        body: JSON.stringify({ resource: "countries", limit, offset, order_by: "name", order_direction: "asc" }),
+        // Ordering uses only server-allowlisted fields (name for both resources).
+        body: JSON.stringify({ resource, limit, offset, order_by: "name", order_direction: "asc" }),
       });
+      if (reqId !== previewReqRef.current) return; // stale response; ignore
       if (!res.ok) throw new Error();
       setPreviewPage(await res.json());
       setPreviewLimit(limit);
       setPreviewOffset(offset);
     } catch {
+      if (reqId !== previewReqRef.current) return;
       setPreviewError(true);
     } finally {
-      setPreviewLoading(false);
+      if (reqId === previewReqRef.current) setPreviewLoading(false);
     }
   };
 
   const openPreview = (c: ConnectionOut) => {
     setPreviewConn(c);
     setPreviewPage(null);
-    void loadPreview(c, 25, 0);
+    setPreviewResource("countries");
+    void loadPreview(c, 25, 0, "countries");
+  };
+
+  const changePreviewResource = (resource: PreviewResource) => {
+    if (!previewConn) return;
+    setPreviewResource(resource);
+    setPreviewPage(null);
+    setPreviewOffset(0);
+    void loadPreview(previewConn, previewLimit, 0, resource);
   };
 
   const closePreview = () => {
@@ -240,6 +271,7 @@ export default function ConnectionsPage() {
     setPreviewError(false);
     setPreviewOffset(0);
     setPreviewLimit(25);
+    setPreviewResource("countries");
   };
 
   const disable = async (c: ConnectionOut) => {
@@ -427,11 +459,14 @@ export default function ConnectionsPage() {
                 <label>
                   {t("previewResource")}
                   <select
-                    value="countries"
-                    disabled
+                    value={previewResource}
+                    onChange={(e) =>
+                      changePreviewResource(e.target.value as PreviewResource)
+                    }
                     className="ms-2 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-white"
                   >
                     <option value="countries">{t("previewCountries")}</option>
+                    <option value="beneficiaries_summary">{t("previewBeneficiaries")}</option>
                   </select>
                 </label>
                 <label>
@@ -439,7 +474,7 @@ export default function ConnectionsPage() {
                   <select
                     value={previewLimit}
                     onChange={(e) =>
-                      void loadPreview(previewConn, Number(e.target.value), 0)
+                      void loadPreview(previewConn, Number(e.target.value), 0, previewResource)
                     }
                     className="ms-2 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-white"
                   >
@@ -463,9 +498,17 @@ export default function ConnectionsPage() {
                   <table className="w-full text-sm">
                     <thead className="bg-slate-950 text-slate-400">
                       <tr>
-                        <th className="px-4 py-2 text-start font-medium">ID</th>
+                        <th className="px-4 py-2 text-start font-medium">{t("previewId")}</th>
                         <th className="px-4 py-2 text-start font-medium">{t("previewName")}</th>
-                        <th className="px-4 py-2 text-start font-medium">{t("previewCode")}</th>
+                        {previewResource === "countries" ? (
+                          <th className="px-4 py-2 text-start font-medium">{t("previewCode")}</th>
+                        ) : (
+                          <>
+                            <th className="px-4 py-2 text-start font-medium">{t("previewIsFamily")}</th>
+                            <th className="px-4 py-2 text-start font-medium">{t("previewDraftSupports")}</th>
+                            <th className="px-4 py-2 text-start font-medium">{t("previewPaidSupports")}</th>
+                          </>
+                        )}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800">
@@ -473,7 +516,29 @@ export default function ConnectionsPage() {
                         <tr key={r.id ?? i} className="text-slate-200">
                           <td className="px-4 py-2" dir="ltr">{r.id ?? "—"}</td>
                           <td className="px-4 py-2">{r.name ?? "—"}</td>
-                          <td className="px-4 py-2" dir="ltr">{r.code ?? "—"}</td>
+                          {previewResource === "countries" ? (
+                            <td className="px-4 py-2" dir="ltr">{r.code ?? "—"}</td>
+                          ) : (
+                            <>
+                              <td className="px-4 py-2">
+                                {typeof r.is_family === "boolean"
+                                  ? r.is_family
+                                    ? t("previewYes")
+                                    : t("previewNo")
+                                  : "—"}
+                              </td>
+                              <td className="px-4 py-2" dir="ltr">
+                                {typeof r.total_draft_supports === "number"
+                                  ? r.total_draft_supports
+                                  : "—"}
+                              </td>
+                              <td className="px-4 py-2" dir="ltr">
+                                {typeof r.total_paid_supports === "number"
+                                  ? r.total_paid_supports
+                                  : "—"}
+                              </td>
+                            </>
+                          )}
                         </tr>
                       ))}
                     </tbody>
@@ -491,6 +556,7 @@ export default function ConnectionsPage() {
                       previewConn,
                       previewLimit,
                       Math.max(0, previewOffset - previewLimit),
+                      previewResource,
                     )
                   }
                   className="rounded-md border border-slate-700 px-3 py-1 text-slate-300 hover:bg-slate-800 disabled:opacity-50"
@@ -509,6 +575,7 @@ export default function ConnectionsPage() {
                       previewConn,
                       previewLimit,
                       previewPage?.next_offset ?? previewOffset + previewLimit,
+                      previewResource,
                     )
                   }
                   className="rounded-md border border-slate-700 px-3 py-1 text-slate-300 hover:bg-slate-800 disabled:opacity-50"
