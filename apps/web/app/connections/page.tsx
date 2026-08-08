@@ -16,7 +16,23 @@ type ConnectionOut = {
   status: string;
   is_active: boolean;
   has_credentials: boolean;
+  auth_mode: string;
+  detected_odoo_version: string | null;
+  detected_edition: string | null;
+  selected_transport: string | null;
+  last_tested_at: string | null;
+  last_test_status: string | null;
+  last_test_error_code: string | null;
   updated_at: string;
+};
+
+type TestResult = {
+  success: boolean;
+  error_code: string | null;
+  odoo_version: string | null;
+  edition: string | null;
+  transport: string | null;
+  tested_at: string;
 };
 
 function csrfHeaders(): Record<string, string> {
@@ -29,10 +45,18 @@ type FormState = {
   base_url: string;
   database_name: string;
   username: string;
+  auth_mode: string;
   secret: string;
 };
 
-const emptyForm: FormState = { name: "", base_url: "", database_name: "", username: "", secret: "" };
+const emptyForm: FormState = {
+  name: "",
+  base_url: "",
+  database_name: "",
+  username: "",
+  auth_mode: "auto",
+  secret: "",
+};
 
 export default function ConnectionsPage() {
   const { t, locale } = useLocale();
@@ -47,6 +71,8 @@ export default function ConnectionsPage() {
   const [form, setForm] = useState<FormState>(emptyForm);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const [testResults, setTestResults] = useState<Record<string, TestResult>>({});
 
   const load = useCallback(async () => {
     try {
@@ -78,6 +104,7 @@ export default function ConnectionsPage() {
       base_url: c.base_url,
       database_name: c.database_name ?? "",
       username: c.username ?? "",
+      auth_mode: c.auth_mode ?? "auto",
       secret: "", // never pre-fill an existing secret
     });
     setFormError(null);
@@ -96,6 +123,7 @@ export default function ConnectionsPage() {
           base_url: form.base_url,
           database_name: form.database_name || null,
           username: form.username || null,
+          auth_mode: form.auth_mode,
         };
         if (form.secret) {
           body.credentials = { login: form.username || form.name, password_or_api_key: form.secret };
@@ -117,6 +145,7 @@ export default function ConnectionsPage() {
             base_url: form.base_url,
             database_name: form.database_name || null,
             username: form.username || null,
+            auth_mode: form.auth_mode,
             credentials: { login: form.username || form.name, password_or_api_key: form.secret },
           }),
         });
@@ -135,6 +164,24 @@ export default function ConnectionsPage() {
       setFormError(t("connError"));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const testConnection = async (c: ConnectionOut) => {
+    setTestingId(c.id);
+    try {
+      const res = await fetch(`/backend/api/v1/connections/${c.id}/test`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: csrfHeaders(),
+      });
+      if (res.ok) {
+        const data: TestResult = await res.json();
+        setTestResults((prev) => ({ ...prev, [c.id]: data }));
+      }
+      await load();
+    } finally {
+      setTestingId(null);
     }
   };
 
@@ -193,6 +240,8 @@ export default function ConnectionsPage() {
                   <th className="px-4 py-3 text-start font-medium">{t("connUsername")}</th>
                   <th className="px-4 py-3 text-start font-medium">{t("connStatus")}</th>
                   <th className="px-4 py-3 text-start font-medium">{t("connCredentials")}</th>
+                  <th className="px-4 py-3 text-start font-medium">{t("connOdooVersion")}</th>
+                  <th className="px-4 py-3 text-start font-medium">{t("connLastTest")}</th>
                   <th className="px-4 py-3 text-start font-medium">{t("connUpdated")}</th>
                   {canWrite && (
                     <th className="px-4 py-3 text-start font-medium">{t("connActions")}</th>
@@ -223,10 +272,53 @@ export default function ConnectionsPage() {
                     <td className="px-4 py-3">
                       {c.has_credentials ? t("connCredsSet") : t("connCredsMissing")}
                     </td>
+                    <td className="px-4 py-3 text-slate-400" dir="ltr">
+                      {c.detected_odoo_version
+                        ? `${c.detected_odoo_version}${
+                            c.detected_edition && c.detected_edition !== "unknown"
+                              ? ` (${
+                                  c.detected_edition === "enterprise"
+                                    ? t("connEnterprise")
+                                    : t("connCommunity")
+                                })`
+                              : ""
+                          }${c.selected_transport ? ` · ${c.selected_transport}` : ""}`
+                        : "—"}
+                    </td>
+                    <td className="px-4 py-3">
+                      {c.last_test_status === "success" ? (
+                        <span className="rounded-full bg-emerald-950 px-2.5 py-1 text-xs text-emerald-400">
+                          {t("connTestOk")}
+                        </span>
+                      ) : c.last_test_status === "error" ? (
+                        <span
+                          className="rounded-full bg-red-950 px-2.5 py-1 text-xs text-red-400"
+                          title={c.last_test_error_code ?? undefined}
+                        >
+                          {t("connTestFail")}
+                        </span>
+                      ) : (
+                        <span className="text-slate-500">—</span>
+                      )}
+                      {c.last_tested_at && (
+                        <span className="ms-2 text-xs text-slate-500">
+                          {dateFmt.format(new Date(c.last_tested_at))}
+                        </span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-slate-400">{dateFmt.format(new Date(c.updated_at))}</td>
                     {canWrite && (
                       <td className="px-4 py-3">
                         <div className="flex gap-3">
+                          {c.status !== "disabled" && c.has_credentials && (
+                            <button
+                              onClick={() => void testConnection(c)}
+                              disabled={testingId === c.id}
+                              className="text-sky-400 hover:text-sky-300 disabled:opacity-60"
+                            >
+                              {testingId === c.id ? t("connTesting") : t("connTest")}
+                            </button>
+                          )}
                           <button
                             onClick={() => openEdit(c)}
                             className="text-emerald-400 hover:text-emerald-300"
@@ -310,6 +402,18 @@ export default function ConnectionsPage() {
                     onChange={(e) => setForm({ ...form, username: e.target.value })}
                     className="mt-1 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-white outline-none focus:border-emerald-500"
                   />
+                </label>
+                <label className="text-sm text-slate-300">
+                  {t("connAuthMode")}
+                  <select
+                    value={form.auth_mode}
+                    onChange={(e) => setForm({ ...form, auth_mode: e.target.value })}
+                    className="mt-1 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-white outline-none focus:border-emerald-500"
+                  >
+                    <option value="auto">{t("connAuthAuto")}</option>
+                    <option value="password">{t("connAuthPassword")}</option>
+                    <option value="api_key">{t("connAuthApiKey")}</option>
+                  </select>
                 </label>
                 <label className="text-sm text-slate-300">
                   {t("connPasswordLabel")}

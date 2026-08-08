@@ -53,6 +53,7 @@ class ConnectionCreate(BaseModel):
     base_url: str = Field(max_length=500)
     database_name: str | None = Field(default=None, max_length=200)
     username: str | None = Field(default=None, max_length=200)
+    auth_mode: Literal["auto", "password", "api_key"] = "auto"
     credentials: OdooCredentials
 
     @field_validator("name")
@@ -81,6 +82,7 @@ class ConnectionUpdate(BaseModel):
     database_name: str | None = Field(default=None, max_length=200)
     username: str | None = Field(default=None, max_length=200)
     status: Literal["configured", "disabled"] | None = None
+    auth_mode: Literal["auto", "password", "api_key"] | None = None
     # If supplied: encrypt and replace. If omitted: keep existing secret.
     credentials: OdooCredentials | None = None
 
@@ -97,7 +99,27 @@ class ConnectionOut(BaseModel):
     status: str
     is_active: bool
     has_credentials: bool
+    auth_mode: str
+    detected_odoo_version: str | None
+    detected_odoo_major: int | None
+    detected_edition: str | None
+    selected_transport: str | None
     last_tested_at: datetime | None
     last_test_status: str | None
+    last_test_error_code: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class ConnectionTestResult(BaseModel):
+    """Safe connectivity test result. Never contains secrets, raw upstream
+    errors, or remote tracebacks."""
+
+    success: bool
+    error_code: str | None = None
+    odoo_version: str | None = None
+    odoo_major: int | None = None
+    edition: str | None = None
+    transport: str | None = None
+    capabilities: dict | None = None
+    tested_at: datetime
