@@ -140,11 +140,15 @@ export default function ConnectionsPage() {
           name: form.name,
           base_url: form.base_url,
           database_name: form.database_name || null,
-          username: form.username || null,
           auth_mode: form.auth_mode,
         };
+        // Canonical login: Connection.username only. Never send it as null
+        // (it cannot be cleared); omit to preserve.
+        if (form.username.trim()) {
+          body.username = form.username.trim();
+        }
         if (form.secret) {
-          body.credentials = { login: form.username || form.name, password_or_api_key: form.secret };
+          body.credentials = { password_or_api_key: form.secret };
         }
         res = await fetch(`/backend/api/v1/connections/${editing.id}`, {
           method: "PATCH",
@@ -162,9 +166,9 @@ export default function ConnectionsPage() {
             provider: "odoo",
             base_url: form.base_url,
             database_name: form.database_name || null,
-            username: form.username || null,
+            username: form.username.trim(),
             auth_mode: form.auth_mode,
-            credentials: { login: form.username || form.name, password_or_api_key: form.secret },
+            credentials: { password_or_api_key: form.secret },
           }),
         });
       }
@@ -571,6 +575,7 @@ export default function ConnectionsPage() {
                   {t("connUsername")}
                   <input
                     dir="ltr"
+                    required={!editing}
                     value={form.username}
                     onChange={(e) => setForm({ ...form, username: e.target.value })}
                     className="mt-1 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-white outline-none focus:border-emerald-500"

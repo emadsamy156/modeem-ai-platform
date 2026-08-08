@@ -26,6 +26,7 @@ from .read_policies import (
     MAX_FILTERS,
     MAX_PREVIEW_OFFSET,
     MAX_REQUESTED_FIELDS,
+    ReadFieldPolicy,
     ReadPolicy,
     get_policy,
 )
@@ -58,12 +59,30 @@ def _validate_fields(policy: ReadPolicy, fields: list[str] | None) -> list[str]:
     return normalized
 
 
-def _validate_scalar(value: Any) -> Any:
-    if isinstance(value, (bool, int)):
+def _validate_typed_scalar(field_policy: ReadFieldPolicy, value: Any) -> Any:
+    """Strict type check against the server-side field policy. NO coercion:
+    "123" is never accepted for an integer field, and bool never counts as
+    an integer/number."""
+    kind = field_policy.value_type
+    if kind == "integer":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ReadPolicyError("filter value type mismatch")
         return value
-    if isinstance(value, str):
+    if kind == "string":
+        if not isinstance(value, str):
+            raise ReadPolicyError("filter value type mismatch")
         if len(value) > MAX_FILTER_STRING_LENGTH:
             raise ReadPolicyError("filter value too long")
+        if field_policy.max_length is not None and len(value) > field_policy.max_length:
+            raise ReadPolicyError("filter value too long")
+        return value
+    if kind == "boolean":
+        if not isinstance(value, bool):
+            raise ReadPolicyError("filter value type mismatch")
+        return value
+    if kind == "number":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ReadPolicyError("filter value type mismatch")
         return value
     raise ReadPolicyError("unsupported filter value type")
 
@@ -87,18 +106,24 @@ def _validate_filters(
             raise ReadPolicyError("filter field not allowed")
         if not isinstance(op, str) or op not in policy.allowed_filter_operators:
             raise ReadPolicyError("filter operator not allowed")
+        field_policy = policy.fields.get(fld)
+        if field_policy is None:
+            raise ReadPolicyError("filter field not allowed")
         if op == "in":
             if not isinstance(value, list) or not value:
                 raise ReadPolicyError("'in' filter requires a non-empty list")
             if len(value) > MAX_FILTER_LIST_ITEMS:
                 raise ReadPolicyError("filter list too long")
-            value = [_validate_scalar(v) for v in value]
+            # Every item must match the field type; mixed lists rejected.
+            value = [_validate_typed_scalar(field_policy, v) for v in value]
         elif op == "ilike":
+            if field_policy.value_type != "string":
+                raise ReadPolicyError("'ilike' is only valid for string fields")
             if not isinstance(value, str):
                 raise ReadPolicyError("'ilike' filter requires a string")
-            _validate_scalar(value)
+            _validate_typed_scalar(field_policy, value)
         else:
-            value = _validate_scalar(value)
+            value = _validate_typed_scalar(field_policy, value)
         domain.append([fld, op, value])
     return domain
 
@@ -122,11 +147,39 @@ def _validate_pagination(policy: ReadPolicy, limit: int, offset: int) -> None:
         raise ReadPolicyError("offset out of range")
 
 
+def _check_output_value(field_policy: ReadFieldPolicy, value: Any) -> None:
+    """Strict output-type validation per the server-side field policy.
+    NO silent coercion of attacker-controlled upstream values; a mismatch
+    raises safe unsupported_response with NO raw value in the detail."""
+    if value is None:
+        if field_policy.nullable:
+            return
+        raise ConnectorError("unsupported_response", "null field value")
+    kind = field_policy.value_type
+    if kind == "integer":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ConnectorError("unsupported_response", "field type mismatch")
+    elif kind == "string":
+        if not isinstance(value, str):
+            raise ConnectorError("unsupported_response", "field type mismatch")
+        if field_policy.max_length is not None and len(value) > field_policy.max_length:
+            raise ConnectorError("unsupported_response", "field value too long")
+    elif kind == "boolean":
+        if not isinstance(value, bool):
+            raise ConnectorError("unsupported_response", "field type mismatch")
+    elif kind == "number":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConnectorError("unsupported_response", "field type mismatch")
+    else:  # pragma: no cover - registry only defines the four types
+        raise ConnectorError("unsupported_response", "unknown field type")
+
+
 def _sanitize_records(
-    raw: Any, fields: list[str], max_expected: int
+    raw: Any, policy: ReadPolicy, fields: list[str], max_expected: int
 ) -> list[dict[str, Any]]:
     """Never blindly return the upstream response: enforce shape, bounds,
-    and field allowlisting. Extra upstream fields are DROPPED."""
+    field allowlisting, AND per-field value types. Extra upstream fields
+    are DROPPED."""
     if not isinstance(raw, list):
         raise ConnectorError("unsupported_response", "not a list")
     if len(raw) > max_expected:
@@ -141,7 +194,13 @@ def _sanitize_records(
             or record["id"] <= 0
         ):
             raise ConnectorError("unsupported_response", "invalid record id")
-        sanitized.append({k: record[k] for k in fields if k in record})
+        clean: dict[str, Any] = {}
+        for k in fields:
+            if k not in record:
+                continue
+            _check_output_value(policy.fields[k], record[k])
+            clean[k] = record[k]
+        sanitized.append(clean)
     return sanitized
 
 
@@ -208,7 +267,7 @@ def read_page(
                 order=safe_order,
             )
 
-    records = _sanitize_records(raw, safe_fields, max_expected=upstream_limit)
+    records = _sanitize_records(raw, policy, safe_fields, max_expected=upstream_limit)
     has_more = len(records) > limit
     records = records[:limit]
     return {
