@@ -11,12 +11,26 @@ Protections:
 - DNS is validated immediately before the request; redirects are disabled
   at the HTTP client level
 
+Accurate statement of the current protection level:
+- DNS is revalidated immediately before EVERY outbound request (httpx
+  request event hook in http.build_client), not just once per test.
+- Redirects are disabled and can never be enabled.
+- ALL resolved addresses that are not globally routable are rejected
+  (default-deny via `not ip.is_global`), covering loopback, RFC1918,
+  link-local, CGNAT 100.64.0.0/10, benchmarking 198.18.0.0/15,
+  documentation/reserved ranges, multicast, unspecified, and non-global
+  IPv6 — for both IPv4 and IPv6.
+- Known cloud metadata endpoints are additionally blocked explicitly as
+  defense-in-depth.
+
 Known limitation (documented, not hidden): full DNS-rebinding protection
-via IP pinning is NOT implemented in this phase. We validate DNS right
-before connecting and never follow redirects, but a malicious resolver
-could still rotate records between validation and connection. Private or
-internal Odoo servers will require an explicit allowlist or the Modeem
-Bridge/Gateway design in a later phase.
+does NOT exist, because the validated IP is not pinned to the actual TCP
+connection. There remains a small DNS-resolution-to-connect TOCTOU window
+between the per-request validation and the transport's own resolution.
+Closing it requires IP pinning at the transport layer (a later phase).
+Private or internal Odoo servers will require an explicit allowlist or
+the Modeem Bridge/Gateway design in a later phase — there is deliberately
+no private-network bypass here.
 """
 
 import ipaddress
@@ -30,8 +44,17 @@ _METADATA_ADDRESSES = frozenset({"169.254.169.254", "fd00:ec2::254", "100.100.10
 
 
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Default-deny: anything not globally routable is blocked.
+
+    `is_global` already excludes loopback, RFC1918, link-local, CGNAT
+    (100.64.0.0/10), benchmarking (198.18.0.0/15), documentation/reserved
+    ranges, multicast, unspecified, and non-global IPv6. The explicit
+    checks and the metadata list are kept as defense-in-depth in case a
+    stdlib version classifies an edge range differently.
+    """
     return (
-        ip.is_loopback
+        not ip.is_global
+        or ip.is_loopback
         or ip.is_private
         or ip.is_link_local
         or ip.is_multicast
@@ -54,6 +77,25 @@ def validate_outbound_url(url: str, *, environment: str) -> None:
         raise ConnectorError("invalid_configuration", "userinfo in url")
     if parts.query or parts.fragment:
         raise ConnectorError("invalid_configuration", "query/fragment in url")
+    _safe_port(parts)
+
+
+def _safe_port(parts) -> int:
+    """Return the effective port, mapping malformed/out-of-range ports to
+    invalid_configuration instead of an internal error.
+
+    Deliberately does NOT restrict to 80/443 — self-hosted Odoo commonly
+    uses custom ports. A configurable outbound port policy may come later.
+    """
+    try:
+        port = parts.port  # raises ValueError for non-numeric/out-of-range
+    except ValueError as exc:
+        raise ConnectorError("invalid_configuration", "invalid port") from exc
+    if port is None:
+        return 443 if parts.scheme == "https" else 80
+    if not (1 <= port <= 65535):
+        raise ConnectorError("invalid_configuration", "port out of range")
+    return port
 
 
 def resolve_and_check_host(hostname: str, port: int) -> list[str]:
@@ -82,8 +124,13 @@ def resolve_and_check_host(hostname: str, port: int) -> list[str]:
 
 
 def enforce_outbound_policy(url: str, *, environment: str) -> None:
-    """Full pre-connection check: URL shape + DNS/IP inspection."""
+    """Full pre-connection check: URL shape + DNS/IP inspection.
+
+    Runs immediately before EVERY outbound request (via the client's
+    request event hook) and additionally once at connector level as
+    defense-in-depth.
+    """
     validate_outbound_url(url, environment=environment)
     parts = urlsplit(url)
-    port = parts.port or (443 if parts.scheme == "https" else 80)
+    port = _safe_port(parts)
     resolve_and_check_host(parts.hostname, port)

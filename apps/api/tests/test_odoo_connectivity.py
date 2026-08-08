@@ -81,7 +81,7 @@ def mock_transport(monkeypatch, allow_outbound):
     """Route the connector's client through a fake Odoo server."""
     state = {"handler": _make_handler()}
     monkeypatch.setattr(
-        safe_http, "build_client", lambda: _mock_client(lambda r: state["handler"](r))
+        safe_http, "build_client", lambda *a, **k: _mock_client(lambda r: state["handler"](r))
     )
     return state
 
@@ -291,24 +291,27 @@ def test_redirects_not_followed(allow_outbound, monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(302, headers={"Location": "http://169.254.169.254/"})
 
-    monkeypatch.setattr(safe_http, "build_client", lambda: _mock_client(handler))
+    monkeypatch.setattr(safe_http, "build_client", lambda *a, **k: _mock_client(handler))
     out = _run_test()
     assert out.success is False
     assert out.error_code in SAFE_ERROR_CODES
 
 
 def test_client_config_hardened():
-    client = safe_http.build_client()
+    client = safe_http.build_client("development")
     try:
         assert client.follow_redirects is False
         assert client.trust_env is False
         assert client.headers["User-Agent"].startswith("Modeem-AI-Platform/")
+        # The per-request security hook is always installed.
+        assert client.event_hooks["request"], "outbound policy hook missing"
     finally:
         client.close()
-    # No API exists to disable TLS verification: build_client takes no args.
+    # No API exists to disable TLS verification.
     import inspect
 
-    assert inspect.signature(safe_http.build_client).parameters == {}
+    params = inspect.signature(safe_http.build_client).parameters
+    assert "verify" not in params
     assert "verify=True" in inspect.getsource(safe_http.build_client)
 
 
@@ -316,10 +319,130 @@ def test_timeout_maps_to_safe_error(allow_outbound, monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectTimeout("boom")
 
-    monkeypatch.setattr(safe_http, "build_client", lambda: _mock_client(handler))
+    monkeypatch.setattr(safe_http, "build_client", lambda *a, **k: _mock_client(handler))
     out = _run_test()
     assert out.success is False
     assert out.error_code == "connection_timeout"
+
+
+# --- Hardening round: per-request validation, default-deny, ports ---------------
+
+
+@pytest.mark.parametrize(
+    "ip",
+    ["100.64.0.1", "100.100.100.200", "100.127.255.254", "198.18.0.1", "127.0.0.1", "::1"],
+)
+def test_cgnat_and_special_networks_blocked(ip):
+    assert security._is_blocked_ip(ipaddress.ip_address(ip)) is True
+
+
+@pytest.mark.parametrize("ip", ["93.184.216.34", "8.8.8.8", "2606:2800:220:1:248:1893:25c8:1946"])
+def test_globally_routable_ips_allowed(ip):
+    assert security._is_blocked_ip(ipaddress.ip_address(ip)) is False
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://example.com:99999", "https://example.com:notaport", "https://example.com:0"],
+)
+def test_invalid_ports_are_invalid_configuration(url):
+    with pytest.raises(ConnectorError) as exc:
+        security.validate_outbound_url(url, environment="development")
+    assert exc.value.code == "invalid_configuration"
+
+
+def test_invalid_port_maps_to_safe_code_via_connector():
+    out = connector.test_connection(
+        base_url="https://example.com:99999",
+        database="db",
+        auth_mode="auto",
+        login="u",
+        secret="s",
+        environment="development",
+    )
+    assert out.success is False
+    assert out.error_code == "invalid_configuration"
+
+
+def test_custom_valid_port_not_rejected_by_shape_check():
+    """Self-hosted Odoo on a custom port must pass URL/port validation."""
+    security.validate_outbound_url("https://example.com:8069", environment="production")
+
+
+def test_dns_rebinding_blocked_before_second_request(monkeypatch):
+    """First resolution is global; the resolver then rebinds to 127.0.0.1.
+    The per-request hook must block the SECOND request BEFORE its transport
+    executes, so credentials are never sent to the rebound destination."""
+    resolutions = {"n": 0}
+
+    def rebinding_getaddrinfo(*a, **k):
+        resolutions["n"] += 1
+        ip = "93.184.216.34" if resolutions["n"] == 1 else "127.0.0.1"
+        return [(2, 1, 6, "", (ip, 443))]
+
+    monkeypatch.setattr(security.socket, "getaddrinfo", rebinding_getaddrinfo)
+
+    transport_hits = {"n": 0}
+    seen_bodies: list[bytes] = []
+    base = _make_handler(major=18)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        transport_hits["n"] += 1
+        seen_bodies.append(request.content)
+        return base(request)
+
+    real_client = safe_http.build_client(
+        "development", transport=httpx.MockTransport(handler)
+    )
+    monkeypatch.setattr(safe_http, "build_client", lambda *a, **k: real_client)
+
+    out = connector.test_connection(
+        base_url="https://rebind.example.com",
+        database="db1",
+        auth_mode="password",
+        login="user",
+        secret=SECRET,
+        environment="development",
+    )
+    assert out.success is False
+    assert out.error_code == "blocked_destination"
+    # Connector-level check consumed resolution #1 (global) — the version
+    # probe's own per-request hook then saw 127.0.0.1 and blocked it, so
+    # AT MOST the first request reached the transport and the credentials
+    # were never sent anywhere.
+    assert transport_hits["n"] <= 1
+    assert all(SECRET.encode() not in body for body in seen_bodies)
+
+
+def test_per_request_hook_validates_every_request(monkeypatch):
+    """Each outbound request triggers its own DNS/IP validation."""
+    calls: list[str] = []
+    real_enforce = security.enforce_outbound_policy
+
+    def counting_enforce(url, *, environment):
+        calls.append(url)
+        # Treat the test hostname as globally routable.
+
+    monkeypatch.setattr(security, "enforce_outbound_policy", counting_enforce)
+    handler = _make_handler(major=18)
+    real_client = safe_http.build_client(
+        "development", transport=httpx.MockTransport(handler)
+    )
+    monkeypatch.setattr(safe_http, "build_client", lambda *a, **k: real_client)
+
+    out = connector.test_connection(
+        base_url="https://odoo.example.com",
+        database="db1",
+        auth_mode="password",
+        login="user",
+        secret=SECRET,
+        environment="development",
+    )
+    assert out.success is True
+    # 1 connector-level check + one check per actual HTTP request
+    # (version probe, authenticate, capability/edition probes).
+    assert len(calls) >= 4
+    assert real_enforce is not None  # keep a reference; silences linters
 
 
 def test_oversized_xmlrpc_stream_halted_at_cap(allow_outbound, monkeypatch):
@@ -336,7 +459,7 @@ def test_oversized_xmlrpc_stream_halted_at_cap(allow_outbound, monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=endless())
 
-    monkeypatch.setattr(safe_http, "build_client", lambda: _mock_client(handler))
+    monkeypatch.setattr(safe_http, "build_client", lambda *a, **k: _mock_client(handler))
     out = _run_test()
     assert out.success is False
     assert out.error_code == "unsupported_response"
@@ -360,7 +483,7 @@ def test_oversized_json2_stream_halted_at_cap(allow_outbound, monkeypatch):
             return httpx.Response(200, content=endless())
         return base(request)
 
-    monkeypatch.setattr(safe_http, "build_client", lambda: _mock_client(handler))
+    monkeypatch.setattr(safe_http, "build_client", lambda *a, **k: _mock_client(handler))
     out = _run_test(auth_mode="api_key", secret="valid-api-key")
     assert out.success is False
     assert out.error_code in SAFE_ERROR_CODES
@@ -375,7 +498,7 @@ def test_declared_oversized_content_length_rejected_before_read(
             200, headers={"Content-Length": str(50_000_000)}, content=b""
         )
 
-    monkeypatch.setattr(safe_http, "build_client", lambda: _mock_client(handler))
+    monkeypatch.setattr(safe_http, "build_client", lambda *a, **k: _mock_client(handler))
     out = _run_test()
     assert out.success is False
     assert out.error_code == "unsupported_response"

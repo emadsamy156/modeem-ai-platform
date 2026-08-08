@@ -18,13 +18,32 @@ MAX_PROBE_RESPONSE_BYTES = 1_000_000  # 1 MB is far beyond any metadata probe
 _TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 
 
-def build_client() -> httpx.Client:
+def _make_policy_hook(environment: str):
+    """Request event hook: revalidate DNS/IP against the ACTUAL destination
+    URL immediately before every outbound request. Centralized here so no
+    adapter can bypass it or forget to call it."""
+
+    def _hook(request: httpx.Request) -> None:
+        from . import security
+
+        security.enforce_outbound_policy(str(request.url), environment=environment)
+
+    return _hook
+
+
+def build_client(
+    environment: str, transport: httpx.BaseTransport | None = None
+) -> httpx.Client:
+    """`transport` is for tests only (mock servers); the security hook runs
+    regardless of transport."""
     return httpx.Client(
         follow_redirects=False,
         trust_env=False,
         verify=True,  # never configurable off
         timeout=_TIMEOUT,
         headers={"User-Agent": USER_AGENT},
+        event_hooks={"request": [_make_policy_hook(environment)]},
+        transport=transport,
     )
 
 

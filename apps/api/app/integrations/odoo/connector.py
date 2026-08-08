@@ -62,11 +62,12 @@ def _run(
     secret: str,
     environment: str,
 ) -> TestOutcome:
-    # Mandatory outbound security policy BEFORE any network call.
+    # Connector-level outbound policy check (defense-in-depth). The client
+    # itself revalidates DNS/IP before EVERY request via its request hook.
     security.enforce_outbound_policy(base_url, environment=environment)
 
     capabilities: dict[str, Any] = {}
-    with safe_http.build_client() as client:
+    with safe_http.build_client(environment) as client:
         version = legacy_xmlrpc.probe_version(client, base_url)
         capabilities["legacy_xmlrpc"] = True
         capabilities["server_serie"] = version.server_serie
