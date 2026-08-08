@@ -532,7 +532,7 @@ def _test_status(cid):
         {"base_url": "https://other.example.com"},
         {"database_name": "other-db"},
         {"auth_mode": "api_key"},
-        {"credentials": {"login": "user", "password_or_api_key": "new-secret-value"}},
+        {"credentials": {"password_or_api_key": "new-secret-value"}},
     ],
 )
 def test_connectivity_change_invalidates_test_metadata(roles_seed, change):

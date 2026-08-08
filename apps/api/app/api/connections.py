@@ -31,6 +31,7 @@ from app.schemas.connections import (
 )
 from app.schemas.odoo_read import ReadPreviewRequest, ReadPreviewResponse
 from app.services.audit import record_audit
+from app.services.connection_auth import AuthMaterialError, resolve_auth_material
 from app.services.credential_crypto import (
     CredentialDecryptionError,
     EncryptionConfigError,
@@ -248,6 +249,15 @@ def update_connection(
             connectivity_changed = True
         conn.database_name = body.database_name
     if "username" in provided:
+        # The canonical login cannot be cleared; same normalized value is
+        # not connectivity-sensitive.
+        if body.username is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="username cannot be cleared",
+            )
+        if body.username != conn.username:
+            connectivity_changed = True
         conn.username = body.username
     if body.status is not None:
         conn.status = body.status
@@ -342,17 +352,26 @@ def test_connection(
             detail="Stored credentials cannot be decrypted",
         ) from exc
 
+    try:
+        auth = resolve_auth_material(conn.username, credentials)
+    except AuthMaterialError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=exc.message
+        ) from exc
+    finally:
+        del credentials
+
     settings = get_settings()
     outcome = odoo_connector.test_connection(
         base_url=conn.base_url,
         database=conn.database_name,
         auth_mode=conn.auth_mode,
-        login=credentials.get("login", ""),
-        secret=credentials.get("password_or_api_key", ""),
+        login=auth.login,
+        secret=auth.secret,
         environment=settings.environment,
     )
     # Minimize plaintext credential lifetime.
-    del credentials
+    del auth
 
     tested_at = datetime.now(UTC)
     conn.last_tested_at = tested_at
@@ -462,6 +481,16 @@ def read_preview(
             detail="Stored credentials cannot be decrypted",
         ) from exc
 
+    try:
+        auth = resolve_auth_material(conn.username, credentials)
+    except AuthMaterialError as exc:
+        # Fails safely BEFORE any network activity; static message only.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=exc.message
+        ) from exc
+    finally:
+        del credentials
+
     settings = get_settings()
 
     def _audit(*, success: bool, returned_count: int | None, error_code: str | None):
@@ -493,8 +522,8 @@ def read_preview(
             base_url=conn.base_url,
             database=conn.database_name,
             transport=conn.selected_transport,
-            login=credentials.get("login", ""),
-            secret=credentials.get("password_or_api_key", ""),
+            login=auth.login,
+            secret=auth.secret,
             environment=settings.environment,
             resource=body.resource,
             fields=body.fields,
@@ -520,7 +549,7 @@ def read_preview(
             detail={"error_code": exc.code},
         ) from exc
     finally:
-        del credentials
+        del auth
 
     _audit(success=True, returned_count=page["returned_count"], error_code=None)
     db.flush()

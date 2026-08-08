@@ -76,7 +76,7 @@ def _payload(name="Odoo Prod", secret=SECRET):
         "base_url": "https://example.odoo.com",
         "database_name": "proddb",
         "username": "api-user",
-        "credentials": {"login": "api-user", "password_or_api_key": secret},
+        "credentials": {"password_or_api_key": secret},
     }
 
 
@@ -199,7 +199,7 @@ def test_metadata_update_preserves_secret_and_new_secret_replaces(roles_seed):
 
     res = client.patch(
         f"/api/v1/connections/{cid}",
-        json={"credentials": {"login": "api-user", "password_or_api_key": "new-secret"}},
+        json={"credentials": {"password_or_api_key": "new-secret"}},
         headers=_csrf(client),
     )
     assert res.status_code == 200
@@ -257,7 +257,7 @@ def test_tenant_isolation(roles_seed):
     assert (
         client_b.patch(
             f"/api/v1/connections/{cid}",
-            json={"credentials": {"login": "x", "password_or_api_key": "y"}},
+            json={"credentials": {"password_or_api_key": "y"}},
             headers=_csrf(client_b),
         ).status_code
         == 404
@@ -355,7 +355,7 @@ def test_audit_logs_contain_no_credentials(roles_seed):
     cid = _create(client).json()["id"]
     client.patch(
         f"/api/v1/connections/{cid}",
-        json={"credentials": {"login": "api-user", "password_or_api_key": "rotated"}},
+        json={"credentials": {"password_or_api_key": "rotated"}},
         headers=_csrf(client),
     )
     client.delete(f"/api/v1/connections/{cid}", headers=_csrf(client))
@@ -481,16 +481,22 @@ def test_patch_omitted_preserves_null_clears(roles_seed):
     assert body["database_name"] == "proddb"
     assert body["username"] == "api-user"
 
-    # Explicit nulls: cleared.
+    # Explicit null database_name: cleared. username can NOT be cleared
+    # (Phase 2E: canonical login identity).
     res = client.patch(
         f"/api/v1/connections/{cid}",
-        json={"database_name": None, "username": None},
+        json={"database_name": None},
         headers=_csrf(client),
     )
     body = res.json()
     assert body["database_name"] is None
-    assert body["username"] is None
+    assert body["username"] == "api-user"
     assert body["has_credentials"] is True  # secret untouched
+
+    res = client.patch(
+        f"/api/v1/connections/{cid}", json={"username": None}, headers=_csrf(client)
+    )
+    assert res.status_code == 422
 
 
 def test_name_whitespace_rules(roles_seed):

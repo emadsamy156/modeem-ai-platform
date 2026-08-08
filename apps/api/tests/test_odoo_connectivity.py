@@ -695,7 +695,7 @@ def test_auth_mode_persisted_and_validated(roles_seed):
         "database_name": "db",
         "username": "u",
         "auth_mode": "api_key",
-        "credentials": {"login": "u", "password_or_api_key": SECRET},
+        "credentials": {"password_or_api_key": SECRET},
     }
     res = client.post("/api/v1/connections", json=payload, headers=_csrf(client))
     assert res.status_code == 201

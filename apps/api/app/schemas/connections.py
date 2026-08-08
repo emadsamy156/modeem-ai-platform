@@ -40,19 +40,37 @@ def validate_base_url(value: str, *, require_https: bool) -> str:
     return f"{parts.scheme}://{parts.netloc}{path}"
 
 
-class OdooCredentials(BaseModel):
-    """Secret payload for provider 'odoo'. Stored only encrypted."""
+def normalize_username(value: str) -> str:
+    """Canonical Odoo login normalization: trim whitespace, reject blank.
+    Connection.username is the ONLY login identity (Phase 2E)."""
+    value = value.strip()
+    if not value:
+        raise ValueError("username must not be blank")
+    return value
 
-    login: str = Field(min_length=1, max_length=255)
+
+class OdooCredentials(BaseModel):
+    """Secret payload for provider 'odoo'. Stored only encrypted.
+
+    Phase 2E: contains ONLY the secret. The Odoo login identity lives
+    exclusively in Connection.username — a `login` key here is rejected.
+    """
+
+    model_config = {"extra": "forbid"}
+
     password_or_api_key: str = Field(min_length=1, max_length=1024)
 
 
 class ConnectionCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     name: str = Field(min_length=1, max_length=120)
     provider: Literal["odoo"]
     base_url: str = Field(max_length=500)
     database_name: str | None = Field(default=None, max_length=200)
-    username: str | None = Field(default=None, max_length=200)
+    # Canonical Odoo login identity — required and non-blank for new
+    # connections (needed by XML-RPC auth and JSON-2 legacy fallback).
+    username: str = Field(min_length=1, max_length=200)
     auth_mode: Literal["auto", "password", "api_key"] = "auto"
     credentials: OdooCredentials
 
@@ -64,8 +82,15 @@ class ConnectionCreate(BaseModel):
             raise ValueError("name must not be blank")
         return v
 
+    @field_validator("username")
+    @classmethod
+    def _normalize_username(cls, v: str) -> str:
+        return normalize_username(v)
+
 
 class ConnectionUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     name: str | None = Field(default=None, min_length=1, max_length=120)
 
     @field_validator("name")
@@ -80,11 +105,22 @@ class ConnectionUpdate(BaseModel):
 
     base_url: str | None = Field(default=None, max_length=500)
     database_name: str | None = Field(default=None, max_length=200)
+    # Omitted -> preserve existing username. Explicit null or blank is
+    # rejected: the canonical login cannot be cleared.
     username: str | None = Field(default=None, max_length=200)
     status: Literal["configured", "disabled"] | None = None
     auth_mode: Literal["auto", "password", "api_key"] | None = None
     # If supplied: encrypt and replace. If omitted: keep existing secret.
     credentials: OdooCredentials | None = None
+
+    @field_validator("username")
+    @classmethod
+    def _normalize_username(cls, v: str | None) -> str | None:
+        if v is None:
+            # Explicit null vs omitted is enforced in the API layer via
+            # model_fields_set (clearing username is rejected there).
+            return None
+        return normalize_username(v)
 
 
 class ConnectionOut(BaseModel):
