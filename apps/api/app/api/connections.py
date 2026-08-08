@@ -25,11 +25,17 @@ from app.models import Connection, User
 from app.schemas.connections import (
     ConnectionCreate,
     ConnectionOut,
+    ConnectionTestResult,
     ConnectionUpdate,
     validate_base_url,
 )
 from app.services.audit import record_audit
-from app.services.credential_crypto import EncryptionConfigError, encrypt_credentials
+from app.services.credential_crypto import (
+    CredentialDecryptionError,
+    EncryptionConfigError,
+    decrypt_credentials,
+    encrypt_credentials,
+)
 
 router = APIRouter(prefix="/api/v1")
 
@@ -47,8 +53,14 @@ def _to_out(conn: Connection) -> ConnectionOut:
         status=conn.status,
         is_active=conn.is_active,
         has_credentials=conn.encrypted_credentials is not None,
+        auth_mode=conn.auth_mode,
+        detected_odoo_version=conn.detected_odoo_version,
+        detected_odoo_major=conn.detected_odoo_major,
+        detected_edition=conn.detected_edition,
+        selected_transport=conn.selected_transport,
         last_tested_at=conn.last_tested_at,
         last_test_status=conn.last_test_status,
+        last_test_error_code=conn.last_test_error_code,
         created_at=conn.created_at,
         updated_at=conn.updated_at,
     )
@@ -155,6 +167,7 @@ def create_connection(
         base_url=base_url,
         database_name=body.database_name,
         username=body.username,
+        auth_mode=body.auth_mode,
         encrypted_credentials=blob,
         encryption_version=version,
         status="configured",
@@ -218,6 +231,8 @@ def update_connection(
     if body.status is not None:
         conn.status = body.status
         conn.is_active = body.status != "disabled"
+    if body.auth_mode is not None:
+        conn.auth_mode = body.auth_mode
 
     credentials_changed = False
     if body.credentials is not None:
@@ -250,6 +265,111 @@ def update_connection(
     )
     db.flush()
     return _to_out(conn)
+
+
+@router.post(
+    "/connections/{connection_id}/test",
+    response_model=ConnectionTestResult,
+    dependencies=[Depends(require_csrf)],
+)
+def test_connection(
+    connection_id: uuid.UUID,
+    ctx: TenantContext = Depends(require_role(*_WRITE_ROLES)),
+    actor: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ConnectionTestResult:
+    """Technical connectivity test — version/auth/capability/edition probes
+    only. Reads NO business data. Returns safe metadata, never secrets or
+    raw upstream errors."""
+    from datetime import UTC, datetime
+
+    from app.integrations.odoo import connector as odoo_connector
+
+    conn = _scoped_get(db, ctx, connection_id)
+    if not conn.is_active or conn.status == "disabled":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Connection is disabled",
+        )
+    if conn.encrypted_credentials is None or conn.encryption_version is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Connection has no stored credentials",
+        )
+    try:
+        credentials = decrypt_credentials(
+            conn.encrypted_credentials,
+            tenant_id=conn.tenant_id,
+            connection_id=conn.id,
+            encryption_version=conn.encryption_version,
+        )
+    except EncryptionConfigError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except CredentialDecryptionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Stored credentials cannot be decrypted",
+        ) from exc
+
+    settings = get_settings()
+    outcome = odoo_connector.test_connection(
+        base_url=conn.base_url,
+        database=conn.database_name,
+        auth_mode=conn.auth_mode,
+        login=credentials.get("login", ""),
+        secret=credentials.get("password_or_api_key", ""),
+        environment=settings.environment,
+    )
+    # Minimize plaintext credential lifetime.
+    del credentials
+
+    tested_at = datetime.now(UTC)
+    conn.last_tested_at = tested_at
+    if outcome.success:
+        conn.last_test_status = "success"
+        conn.last_test_error_code = None
+        conn.detected_odoo_version = outcome.odoo_version
+        conn.detected_odoo_major = outcome.odoo_major
+        conn.detected_edition = outcome.edition
+        conn.selected_transport = outcome.transport
+        import json as _json
+
+        conn.capabilities_json = _json.dumps(outcome.capabilities)
+    else:
+        # Never overwrite previously known good metadata with failure data.
+        conn.last_test_status = "error"
+        conn.last_test_error_code = outcome.error_code
+
+    record_audit(
+        db,
+        action=(
+            "connection.test_succeeded" if outcome.success else "connection.test_failed"
+        ),
+        actor_type="user",
+        actor_id=str(actor.id),
+        tenant_id=ctx.tenant.id,
+        resource_type="connection",
+        resource_id=str(conn.id),
+        metadata={
+            "provider": conn.provider,
+            "detected_odoo_version": outcome.odoo_version,
+            "selected_transport": outcome.transport,
+            "error_code": outcome.error_code,
+        },
+    )
+    db.flush()
+    return ConnectionTestResult(
+        success=outcome.success,
+        error_code=outcome.error_code,
+        odoo_version=outcome.odoo_version,
+        odoo_major=outcome.odoo_major,
+        edition=outcome.edition if outcome.success else None,
+        transport=outcome.transport if outcome.success else None,
+        capabilities=outcome.capabilities if outcome.success else None,
+        tested_at=tested_at,
+    )
 
 
 @router.delete(

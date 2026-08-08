@@ -15,6 +15,7 @@ dependencies = [
     "PyJWT",
     "email-validator",
     "cryptography",
+    "httpx",
 ]
 
 [project.optional-dependencies]
