@@ -13,9 +13,15 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.csrf import require_csrf
-from app.api.deps import TenantContext, get_current_tenant, get_db, require_role
+from app.api.deps import (
+    TenantContext,
+    get_current_tenant,
+    get_current_user,
+    get_db,
+    require_role,
+)
 from app.core.config import get_settings
-from app.models import Connection
+from app.models import Connection, User
 from app.schemas.connections import (
     ConnectionCreate,
     ConnectionOut,
@@ -118,6 +124,7 @@ def get_connection(
 def create_connection(
     body: ConnectionCreate,
     ctx: TenantContext = Depends(require_role(*_WRITE_ROLES)),
+    actor: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ConnectionOut:
     base_url = _checked_base_url(body.base_url)
@@ -140,7 +147,6 @@ def create_connection(
         connection_id=connection_id,
     )
 
-    actor_id = str(ctx.membership.user_id) if ctx.membership else "superuser"
     conn = Connection(
         id=connection_id,
         tenant_id=ctx.tenant.id,
@@ -152,8 +158,8 @@ def create_connection(
         encrypted_credentials=blob,
         encryption_version=version,
         status="configured",
-        created_by_user_id=ctx.membership.user_id if ctx.membership else None,
-        updated_by_user_id=ctx.membership.user_id if ctx.membership else None,
+        created_by_user_id=actor.id,
+        updated_by_user_id=actor.id,
     )
     db.add(conn)
     db.flush()
@@ -161,7 +167,7 @@ def create_connection(
         db,
         action="connection.created",
         actor_type="user",
-        actor_id=actor_id,
+        actor_id=str(actor.id),
         tenant_id=ctx.tenant.id,
         resource_type="connection",
         resource_id=str(conn.id),
@@ -179,12 +185,14 @@ def update_connection(
     connection_id: uuid.UUID,
     body: ConnectionUpdate,
     ctx: TenantContext = Depends(require_role(*_WRITE_ROLES)),
+    actor: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ConnectionOut:
     conn = _scoped_get(db, ctx, connection_id)
+    provided = body.model_fields_set
 
-    if body.name is not None and body.name.strip() != conn.name:
-        new_name = body.name.strip()
+    if body.name is not None and body.name != conn.name:
+        new_name = body.name
         duplicate = (
             db.query(Connection)
             .filter(
@@ -202,9 +210,10 @@ def update_connection(
         conn.name = new_name
     if body.base_url is not None:
         conn.base_url = _checked_base_url(body.base_url)
-    if body.database_name is not None:
+    # Omitted field -> preserve; explicit JSON null -> clear (nullable metadata).
+    if "database_name" in provided:
         conn.database_name = body.database_name
-    if body.username is not None:
+    if "username" in provided:
         conn.username = body.username
     if body.status is not None:
         conn.status = body.status
@@ -222,15 +231,14 @@ def update_connection(
         credentials_changed = True
     # If no new credential is supplied, the existing encrypted blob is kept.
 
-    conn.updated_by_user_id = ctx.membership.user_id if ctx.membership else None
-    actor_id = str(ctx.membership.user_id) if ctx.membership else "superuser"
+    conn.updated_by_user_id = actor.id
     record_audit(
         db,
         action=(
             "connection.credentials_replaced" if credentials_changed else "connection.updated"
         ),
         actor_type="user",
-        actor_id=actor_id,
+        actor_id=str(actor.id),
         tenant_id=ctx.tenant.id,
         resource_type="connection",
         resource_id=str(conn.id),
@@ -252,19 +260,19 @@ def update_connection(
 def disable_connection(
     connection_id: uuid.UUID,
     ctx: TenantContext = Depends(require_role(*_WRITE_ROLES)),
+    actor: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ConnectionOut:
     """Soft disable — the record and its encrypted credential are retained."""
     conn = _scoped_get(db, ctx, connection_id)
     conn.status = "disabled"
     conn.is_active = False
-    conn.updated_by_user_id = ctx.membership.user_id if ctx.membership else None
-    actor_id = str(ctx.membership.user_id) if ctx.membership else "superuser"
+    conn.updated_by_user_id = actor.id
     record_audit(
         db,
         action="connection.disabled",
         actor_type="user",
-        actor_id=actor_id,
+        actor_id=str(actor.id),
         tenant_id=ctx.tenant.id,
         resource_type="connection",
         resource_id=str(conn.id),

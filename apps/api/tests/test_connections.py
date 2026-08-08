@@ -107,7 +107,7 @@ def test_encrypt_decrypt_roundtrip_and_random_nonce():
     assert blob1 != blob2  # random nonce per encryption
     assert v1 == credential_crypto.ENCRYPTION_VERSION
     assert SECRET.encode() not in blob1
-    assert decrypt_credentials(blob1, tenant_id=t, connection_id=c) == payload
+    assert decrypt_credentials(blob1, tenant_id=t, connection_id=c, encryption_version=v1) == payload
 
 
 def test_tampered_ciphertext_fails():
@@ -115,16 +115,16 @@ def test_tampered_ciphertext_fails():
     blob, _ = encrypt_credentials({"a": "b"}, tenant_id=t, connection_id=c)
     tampered = blob[:-1] + bytes([blob[-1] ^ 0xFF])
     with pytest.raises(CredentialDecryptionError):
-        decrypt_credentials(tampered, tenant_id=t, connection_id=c)
+        decrypt_credentials(tampered, tenant_id=t, connection_id=c, encryption_version=1)
 
 
 def test_aad_binds_connection_and_tenant():
     t, c = uuid.uuid4(), uuid.uuid4()
     blob, _ = encrypt_credentials({"a": "b"}, tenant_id=t, connection_id=c)
     with pytest.raises(CredentialDecryptionError):
-        decrypt_credentials(blob, tenant_id=t, connection_id=uuid.uuid4())
+        decrypt_credentials(blob, tenant_id=t, connection_id=uuid.uuid4(), encryption_version=1)
     with pytest.raises(CredentialDecryptionError):
-        decrypt_credentials(blob, tenant_id=uuid.uuid4(), connection_id=c)
+        decrypt_credentials(blob, tenant_id=uuid.uuid4(), connection_id=c, encryption_version=1)
 
 
 def test_production_rejects_missing_or_invalid_key(monkeypatch):
@@ -164,7 +164,10 @@ def test_plaintext_not_stored_and_responses_safe(roles_seed):
     assert SECRET.encode() not in (conn.encrypted_credentials or b"")
     # Decryptable only via the backend service with correct AAD.
     creds = decrypt_credentials(
-        conn.encrypted_credentials, tenant_id=conn.tenant_id, connection_id=conn.id
+        conn.encrypted_credentials,
+        tenant_id=conn.tenant_id,
+        connection_id=conn.id,
+        encryption_version=conn.encryption_version,
     )
     assert creds["password_or_api_key"] == SECRET
     db.close()
@@ -204,7 +207,10 @@ def test_metadata_update_preserves_secret_and_new_secret_replaces(roles_seed):
     conn = db.query(Connection).one()
     assert conn.encrypted_credentials != blob_before  # replaced
     creds = decrypt_credentials(
-        conn.encrypted_credentials, tenant_id=conn.tenant_id, connection_id=conn.id
+        conn.encrypted_credentials,
+        tenant_id=conn.tenant_id,
+        connection_id=conn.id,
+        encryption_version=conn.encryption_version,
     )
     assert creds["password_or_api_key"] == "new-secret"
     db.close()
@@ -377,3 +383,176 @@ def test_unconfigured_key_fails_clearly(roles_seed, monkeypatch):
     res = _create(client)
     assert res.status_code == 503
     assert "CONNECTION_ENCRYPTION_KEY" in res.json()["detail"]
+
+
+# --- Hardening round ----------------------------------------------------------
+
+
+def test_v1_data_decrypts_with_stored_version():
+    t, c = uuid.uuid4(), uuid.uuid4()
+    payload = {"login": "x", "password_or_api_key": SECRET}
+    blob, version = encrypt_credentials(payload, tenant_id=t, connection_id=c)
+    assert version == credential_crypto.CURRENT_ENCRYPTION_VERSION == 1
+    assert (
+        decrypt_credentials(
+            blob, tenant_id=t, connection_id=c, encryption_version=version
+        )
+        == payload
+    )
+
+
+def test_unsupported_encryption_version_rejected():
+    t, c = uuid.uuid4(), uuid.uuid4()
+    blob, _ = encrypt_credentials({"a": "b"}, tenant_id=t, connection_id=c)
+    for bad_version in (0, 2, 99, -1):
+        with pytest.raises(CredentialDecryptionError):
+            decrypt_credentials(
+                blob, tenant_id=t, connection_id=c, encryption_version=bad_version
+            )
+
+
+def test_decryption_aad_uses_stored_version_not_current(monkeypatch):
+    """Bumping the current version must not alter the AAD of existing v1 data."""
+    t, c = uuid.uuid4(), uuid.uuid4()
+    payload = {"login": "x", "password_or_api_key": SECRET}
+    blob, version = encrypt_credentials(payload, tenant_id=t, connection_id=c)
+    assert version == 1
+    # Simulate a future version bump.
+    monkeypatch.setattr(credential_crypto, "CURRENT_ENCRYPTION_VERSION", 2)
+    assert (
+        decrypt_credentials(
+            blob, tenant_id=t, connection_id=c, encryption_version=1
+        )
+        == payload
+    )
+
+
+def test_superuser_audit_records_real_user_uuid(roles_seed):
+    db = TestingSession()
+    su = User(
+        email="super@example.com",
+        full_name="Super",
+        password_hash=hash_password(PASSWORD),
+        is_superuser=True,
+    )
+    db.add(su)
+    db.commit()
+    su_id = su.id
+    tenant_a = roles_seed["tenant_a"]
+    db.close()
+
+    client = _client()
+    _login(client, "super@example.com")
+    res = client.post(
+        "/api/v1/auth/tenant", json={"tenant_id": str(tenant_a)}, headers=_csrf(client)
+    )
+    assert res.status_code == 200
+    res = _create(client, name="Super Conn")
+    assert res.status_code == 201
+    cid = res.json()["id"]
+    client.delete(f"/api/v1/connections/{cid}", headers=_csrf(client))
+
+    db = TestingSession()
+    conn = db.query(Connection).filter(Connection.name == "Super Conn").one()
+    assert conn.created_by_user_id == su_id
+    assert conn.updated_by_user_id == su_id
+    entries = (
+        db.query(AuditLog)
+        .filter(AuditLog.resource_type == "connection", AuditLog.resource_id == cid)
+        .all()
+    )
+    assert entries
+    for e in entries:
+        assert e.actor_id == str(su_id)
+        assert e.actor_id != "superuser"
+    db.close()
+
+
+def test_patch_omitted_preserves_null_clears(roles_seed):
+    client = _client()
+    _login(client, "owner@example.com")
+    cid = _create(client).json()["id"]
+
+    # Omitted fields: preserved.
+    res = client.patch(
+        f"/api/v1/connections/{cid}", json={"name": "Renamed"}, headers=_csrf(client)
+    )
+    body = res.json()
+    assert body["database_name"] == "proddb"
+    assert body["username"] == "api-user"
+
+    # Explicit nulls: cleared.
+    res = client.patch(
+        f"/api/v1/connections/{cid}",
+        json={"database_name": None, "username": None},
+        headers=_csrf(client),
+    )
+    body = res.json()
+    assert body["database_name"] is None
+    assert body["username"] is None
+    assert body["has_credentials"] is True  # secret untouched
+
+
+def test_name_whitespace_rules(roles_seed):
+    client = _client()
+    _login(client, "owner@example.com")
+    for bad in ("", "   ", "\t\n"):
+        payload = _payload()
+        payload["name"] = bad
+        assert (
+            client.post(
+                "/api/v1/connections", json=payload, headers=_csrf(client)
+            ).status_code
+            == 422
+        ), repr(bad)
+    cid = _create(client, name="  Padded Name  ").json()["id"]
+    res = client.get(f"/api/v1/connections/{cid}")
+    assert res.json()["name"] == "Padded Name"  # trimmed before persistence
+    for bad in ("", "   "):
+        assert (
+            client.patch(
+                f"/api/v1/connections/{cid}", json={"name": bad}, headers=_csrf(client)
+            ).status_code
+            == 422
+        ), repr(bad)
+
+
+def test_strict_base64_key_validation():
+    # Valid URL-safe Base64 of 32 bytes.
+    assert len(validate_encryption_key(TEST_KEY)) == 32
+    # Malformed Base64 (bad padding/length).
+    with pytest.raises(EncryptionConfigError):
+        validate_encryption_key("abc")
+    # Wrong decoded length.
+    with pytest.raises(EncryptionConfigError):
+        validate_encryption_key(base64.urlsafe_b64encode(b"x" * 16).decode())
+    # Unexpected characters must be rejected, not ignored.
+    with pytest.raises(EncryptionConfigError):
+        validate_encryption_key("!!" + TEST_KEY[2:])
+    with pytest.raises(EncryptionConfigError):
+        validate_encryption_key(TEST_KEY[:-2] + "+/")  # standard alphabet chars
+
+
+def test_base_url_normalization(roles_seed):
+    client = _client()
+    _login(client, "owner@example.com")
+    # Query strings and fragments rejected.
+    for bad in (
+        "https://example.com/?a=1",
+        "https://example.com/#frag",
+        "https://example.com/path?x=y",
+    ):
+        payload = _payload()
+        payload["base_url"] = bad
+        assert (
+            client.post(
+                "/api/v1/connections", json=payload, headers=_csrf(client)
+            ).status_code
+            == 422
+        ), bad
+    # Trailing slash stripped.
+    payload = _payload()
+    payload["base_url"] = "https://example.odoo.com/"
+    res = client.post("/api/v1/connections", json=payload, headers=_csrf(client))
+    assert res.status_code == 201
+    assert res.json()["base_url"] == "https://example.odoo.com"

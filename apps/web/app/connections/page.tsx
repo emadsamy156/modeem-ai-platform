@@ -126,6 +126,9 @@ export default function ConnectionsPage() {
         setFormError(typeof data?.detail === "string" ? data.detail : t("connError"));
         return;
       }
+      // Clear form state (including the secret) before closing.
+      setForm(emptyForm);
+      setEditing(null);
       setShowForm(false);
       await load();
     } catch {
@@ -331,7 +334,13 @@ export default function ConnectionsPage() {
               <div className="mt-6 flex justify-end gap-3">
                 <button
                   type="button"
-                  onClick={() => setShowForm(false)}
+                  onClick={() => {
+                    // Clear secret/form state on cancel.
+                    setForm(emptyForm);
+                    setEditing(null);
+                    setFormError(null);
+                    setShowForm(false);
+                  }}
                   className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800"
                 >
                   {t("connCancel")}

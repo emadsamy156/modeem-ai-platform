@@ -29,7 +29,10 @@ from typing import Any
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-ENCRYPTION_VERSION = 1
+CURRENT_ENCRYPTION_VERSION = 1
+# Kept for backward compatibility with existing imports.
+ENCRYPTION_VERSION = CURRENT_ENCRYPTION_VERSION
+_SUPPORTED_VERSIONS = frozenset({1})
 _KEY_BYTES = 32
 _NONCE_BYTES = 12
 
@@ -54,7 +57,11 @@ def validate_encryption_key(encoded_key: str) -> bytes:
             "print(base64.urlsafe_b64encode(os.urandom(32)).decode())\""
         )
     try:
-        raw = base64.urlsafe_b64decode(encoded_key.encode("ascii"))
+        # validate=True rejects any character outside the URL-safe Base64
+        # alphabet instead of silently ignoring it.
+        raw = base64.b64decode(
+            encoded_key.encode("ascii"), altchars=b"-_", validate=True
+        )
     except (ValueError, binascii.Error) as exc:
         raise EncryptionConfigError(
             "CONNECTION_ENCRYPTION_KEY is not valid URL-safe Base64."
@@ -72,34 +79,51 @@ def _load_key() -> bytes:
     return validate_encryption_key(get_settings().connection_encryption_key)
 
 
-def _aad(tenant_id: uuid.UUID, connection_id: uuid.UUID) -> bytes:
-    return f"modeem:connection:v{ENCRYPTION_VERSION}:{tenant_id}:{connection_id}".encode()
+def _aad(version: int, tenant_id: uuid.UUID, connection_id: uuid.UUID) -> bytes:
+    return f"modeem:connection:v{version}:{tenant_id}:{connection_id}".encode()
 
 
 def encrypt_credentials(
     payload: dict[str, Any], *, tenant_id: uuid.UUID, connection_id: uuid.UUID
 ) -> tuple[bytes, int]:
-    """Encrypt a credential payload; returns (nonce||ciphertext, version)."""
+    """Encrypt a credential payload; returns (nonce||ciphertext, version).
+
+    Always encrypts with CURRENT_ENCRYPTION_VERSION; the returned version
+    must be stored alongside the blob and supplied back at decryption time.
+    """
     key = _load_key()
     nonce = os.urandom(_NONCE_BYTES)
     plaintext = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    ciphertext = AESGCM(key).encrypt(nonce, plaintext, _aad(tenant_id, connection_id))
-    return nonce + ciphertext, ENCRYPTION_VERSION
+    ciphertext = AESGCM(key).encrypt(
+        nonce, plaintext, _aad(CURRENT_ENCRYPTION_VERSION, tenant_id, connection_id)
+    )
+    return nonce + ciphertext, CURRENT_ENCRYPTION_VERSION
 
 
 def decrypt_credentials(
-    blob: bytes, *, tenant_id: uuid.UUID, connection_id: uuid.UUID
+    blob: bytes,
+    *,
+    tenant_id: uuid.UUID,
+    connection_id: uuid.UUID,
+    encryption_version: int,
 ) -> dict[str, Any]:
     """Decrypt a credential payload. Trusted backend use only.
 
+    The stored per-record ``encryption_version`` MUST be supplied explicitly;
+    the AAD is built from it, never from the current global version, so
+    bumping CURRENT_ENCRYPTION_VERSION later cannot break existing records.
     Must never be exposed through any API endpoint.
     """
+    if encryption_version not in _SUPPORTED_VERSIONS:
+        raise CredentialDecryptionError("Unsupported encryption version.")
     key = _load_key()
     if len(blob) <= _NONCE_BYTES:
         raise CredentialDecryptionError("Ciphertext too short.")
     nonce, ciphertext = blob[:_NONCE_BYTES], blob[_NONCE_BYTES:]
     try:
-        plaintext = AESGCM(key).decrypt(nonce, ciphertext, _aad(tenant_id, connection_id))
+        plaintext = AESGCM(key).decrypt(
+            nonce, ciphertext, _aad(encryption_version, tenant_id, connection_id)
+        )
     except InvalidTag as exc:
         raise CredentialDecryptionError(
             "Credential ciphertext failed authentication."

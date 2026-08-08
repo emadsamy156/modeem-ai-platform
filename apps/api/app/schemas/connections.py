@@ -13,6 +13,13 @@ from pydantic import BaseModel, Field, field_validator
 
 
 def validate_base_url(value: str, *, require_https: bool) -> str:
+    """Validate and normalize a stored base URL.
+
+    Rejects credentials-in-URL, query strings, and fragments; strips any
+    trailing slash from the path. Never fetches or resolves the host —
+    SSRF/IP/DNS protections are a Phase 2C prerequisite before any
+    network call is allowed.
+    """
     value = value.strip()
     parts = urlsplit(value)
     if parts.scheme not in ("http", "https"):
@@ -25,7 +32,12 @@ def validate_base_url(value: str, *, require_https: bool) -> str:
         raise ValueError(
             "base_url must not contain credentials; store them separately"
         )
-    return value
+    if parts.query:
+        raise ValueError("base_url must not contain a query string")
+    if parts.fragment:
+        raise ValueError("base_url must not contain a fragment")
+    path = parts.path.rstrip("/")
+    return f"{parts.scheme}://{parts.netloc}{path}"
 
 
 class OdooCredentials(BaseModel):
@@ -54,6 +66,17 @@ class ConnectionCreate(BaseModel):
 
 class ConnectionUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            raise ValueError("name must not be blank")
+        return v
+
     base_url: str | None = Field(default=None, max_length=500)
     database_name: str | None = Field(default=None, max_length=200)
     username: str | None = Field(default=None, max_length=200)
