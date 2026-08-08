@@ -65,6 +65,14 @@ def _map_fault(fault: xmlrpc.client.Fault) -> ConnectorError:
         return ConnectorError("database_not_found")
     if "access denied" in text or "accessdenied" in text:
         return ConnectorError("authentication_failed")
+    if (
+        "accesserror" in text
+        or "not allowed" in text
+        or "access right" in text
+        or "access rights" in text
+    ):
+        # Authenticated but lacking model permission. Raw text never leaks.
+        return ConnectorError("access_denied")
     # Never propagate the raw fault string to callers/API.
     return ConnectorError("unsupported_response")
 
@@ -117,6 +125,40 @@ def probe_capabilities(
     version: OdooVersionInfo,
 ) -> dict[str, Any]:
     return {"legacy_xmlrpc": True}
+
+
+def search_read(
+    client: httpx.Client,
+    base_url: str,
+    database: str | None,
+    login: str,
+    secret: str,
+    *,
+    model: str,
+    domain: list,
+    fields: list[str],
+    offset: int,
+    limit: int,
+    order: str | None,
+) -> Any:
+    """READ-ONLY search_read via execute_kw. `model`, `fields`, and `order`
+    come exclusively from the server-side read policy — no caller controls
+    them, and no other method name is ever sent."""
+    uid = authenticate(client, base_url, database, login, secret)
+    kwargs: dict[str, Any] = {
+        "fields": list(fields),
+        "offset": offset,
+        "limit": limit,
+    }
+    if order:
+        kwargs["order"] = order
+    return _call(
+        client,
+        base_url,
+        "object",
+        "execute_kw",
+        (database, uid, secret, model, "search_read", [domain], kwargs),
+    )
 
 
 def detect_edition(
