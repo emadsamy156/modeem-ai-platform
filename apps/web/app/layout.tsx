@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { AppShell } from "@/components/app-shell";
+import { AuthProvider } from "@/components/auth-provider";
 import { LocaleProvider } from "@/components/locale-provider";
-import { Sidebar } from "@/components/sidebar";
 
 export const metadata: Metadata = {
   title: "Modeem AI Platform",
@@ -13,10 +14,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="ar" dir="rtl">
       <body className="antialiased">
         <LocaleProvider>
-          <div className="flex min-h-screen">
-            <Sidebar />
-            {children}
-          </div>
+          <AuthProvider>
+            <AppShell>{children}</AppShell>
+          </AuthProvider>
         </LocaleProvider>
       </body>
     </html>
