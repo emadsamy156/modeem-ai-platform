@@ -15,6 +15,7 @@ SAFE_ERROR_CODES = frozenset(
         "not_odoo",
         "unsupported_response",
         "authentication_failed",
+        "access_denied",
         "database_not_found",
         "json2_unavailable",
         "unsupported_version",

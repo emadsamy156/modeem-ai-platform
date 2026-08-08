@@ -81,6 +81,53 @@ def probe_auth(
         raise ConnectorError("unsupported_response")
 
 
+def search_read(
+    client: httpx.Client,
+    base_url: str,
+    database: str | None,
+    api_key: str,
+    *,
+    model: str,
+    domain: list,
+    fields: list[str],
+    offset: int,
+    limit: int,
+    order: str | None,
+) -> Any:
+    """READ-ONLY search_read over JSON-2. `model`, `fields`, and `order`
+    come exclusively from the server-side read policy. Body contains only
+    validated named arguments — no user-provided context."""
+    payload: dict[str, Any] = {
+        "domain": domain,
+        "fields": list(fields),
+        "offset": offset,
+        "limit": limit,
+    }
+    if order:
+        payload["order"] = order
+    response = _post(client, base_url, model, "search_read", api_key, database, payload)
+    if response.status_code in (301, 302, 303, 307, 308):
+        raise ConnectorError("unsupported_response", "redirect")
+    if response.status_code == 404:
+        raise ConnectorError("json2_unavailable")
+    if response.status_code == 401:
+        raise ConnectorError("authentication_failed")
+    if response.status_code == 403:
+        # Authenticated but lacking permission. Error body never leaks.
+        raise ConnectorError("access_denied")
+    if response.status_code >= 500:
+        raise ConnectorError("server_unreachable")
+    if response.status_code != 200:
+        raise ConnectorError("unsupported_response", f"status {response.status_code}")
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise ConnectorError("unsupported_response") from exc
+    if isinstance(body, dict) and isinstance(body.get("result"), list):
+        return body["result"]
+    return body
+
+
 def detect_edition(
     client: httpx.Client, base_url: str, database: str | None, api_key: str
 ) -> tuple[str, str]:

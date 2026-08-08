@@ -26,6 +26,18 @@ type ConnectionOut = {
   updated_at: string;
 };
 
+type PreviewRecord = { id?: number; name?: string; code?: string };
+
+type PreviewPage = {
+  resource: string;
+  records: PreviewRecord[];
+  limit: number;
+  offset: number;
+  returned_count: number;
+  has_more: boolean;
+  next_offset: number | null;
+};
+
 type TestResult = {
   success: boolean;
   error_code: string | null;
@@ -73,6 +85,12 @@ export default function ConnectionsPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, TestResult>>({});
+  const [previewConn, setPreviewConn] = useState<ConnectionOut | null>(null);
+  const [previewPage, setPreviewPage] = useState<PreviewPage | null>(null);
+  const [previewLimit, setPreviewLimit] = useState(25);
+  const [previewOffset, setPreviewOffset] = useState(0);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -183,6 +201,41 @@ export default function ConnectionsPage() {
     } finally {
       setTestingId(null);
     }
+  };
+
+  const loadPreview = async (c: ConnectionOut, limit: number, offset: number) => {
+    setPreviewLoading(true);
+    setPreviewError(false);
+    try {
+      const res = await fetch(`/backend/api/v1/connections/${c.id}/read-preview`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...csrfHeaders() },
+        body: JSON.stringify({ resource: "countries", limit, offset, order_by: "name", order_direction: "asc" }),
+      });
+      if (!res.ok) throw new Error();
+      setPreviewPage(await res.json());
+      setPreviewLimit(limit);
+      setPreviewOffset(offset);
+    } catch {
+      setPreviewError(true);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const openPreview = (c: ConnectionOut) => {
+    setPreviewConn(c);
+    setPreviewPage(null);
+    void loadPreview(c, 25, 0);
+  };
+
+  const closePreview = () => {
+    setPreviewConn(null);
+    setPreviewPage(null);
+    setPreviewError(false);
+    setPreviewOffset(0);
+    setPreviewLimit(25);
   };
 
   const disable = async (c: ConnectionOut) => {
@@ -319,6 +372,14 @@ export default function ConnectionsPage() {
                               {testingId === c.id ? t("connTesting") : t("connTest")}
                             </button>
                           )}
+                          {c.status !== "disabled" && c.last_test_status === "success" && (
+                            <button
+                              onClick={() => openPreview(c)}
+                              className="text-violet-400 hover:text-violet-300"
+                            >
+                              {t("connPreview")}
+                            </button>
+                          )}
                           <button
                             onClick={() => openEdit(c)}
                             className="text-emerald-400 hover:text-emerald-300"
@@ -342,6 +403,118 @@ export default function ConnectionsPage() {
             </table>
           </div>
         ) : null}
+
+        {previewConn && canWrite && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+            <div className="w-full max-w-2xl rounded-xl border border-slate-800 bg-slate-900 p-6 shadow-xl">
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-semibold text-white">
+                  {t("connPreviewTitle")} — {previewConn.name}
+                </h2>
+                <button
+                  onClick={closePreview}
+                  className="rounded-md border border-slate-700 px-3 py-1 text-sm text-slate-300 hover:bg-slate-800"
+                >
+                  {t("connClose")}
+                </button>
+              </div>
+
+              <div className="mt-4 flex flex-wrap items-center gap-3 text-sm text-slate-300">
+                <label>
+                  {t("previewResource")}
+                  <select
+                    value="countries"
+                    disabled
+                    className="ms-2 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-white"
+                  >
+                    <option value="countries">{t("previewCountries")}</option>
+                  </select>
+                </label>
+                <label>
+                  {t("previewPageSize")}
+                  <select
+                    value={previewLimit}
+                    onChange={(e) =>
+                      void loadPreview(previewConn, Number(e.target.value), 0)
+                    }
+                    className="ms-2 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-white"
+                  >
+                    <option value={10}>10</option>
+                    <option value={25}>25</option>
+                    <option value={50}>50</option>
+                  </select>
+                </label>
+              </div>
+
+              {previewError && (
+                <p className="mt-4 rounded-md border border-red-800 bg-red-950/40 p-3 text-sm text-red-300">
+                  {t("previewError")}
+                </p>
+              )}
+
+              {previewLoading ? (
+                <p className="mt-4 text-slate-400">{t("loading")}</p>
+              ) : previewPage && previewPage.records.length > 0 ? (
+                <div className="mt-4 overflow-x-auto rounded-lg border border-slate-800">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-950 text-slate-400">
+                      <tr>
+                        <th className="px-4 py-2 text-start font-medium">ID</th>
+                        <th className="px-4 py-2 text-start font-medium">{t("previewName")}</th>
+                        <th className="px-4 py-2 text-start font-medium">{t("previewCode")}</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800">
+                      {previewPage.records.map((r, i) => (
+                        <tr key={r.id ?? i} className="text-slate-200">
+                          <td className="px-4 py-2" dir="ltr">{r.id ?? "—"}</td>
+                          <td className="px-4 py-2">{r.name ?? "—"}</td>
+                          <td className="px-4 py-2" dir="ltr">{r.code ?? "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : previewPage ? (
+                <p className="mt-4 text-slate-400">{t("previewEmpty")}</p>
+              ) : null}
+
+              <div className="mt-4 flex items-center justify-between text-sm">
+                <button
+                  disabled={previewLoading || previewOffset === 0}
+                  onClick={() =>
+                    void loadPreview(
+                      previewConn,
+                      previewLimit,
+                      Math.max(0, previewOffset - previewLimit),
+                    )
+                  }
+                  className="rounded-md border border-slate-700 px-3 py-1 text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+                >
+                  {t("previewPrev")}
+                </button>
+                <span className="text-slate-500">
+                  {previewPage
+                    ? `${previewOffset + 1}–${previewOffset + previewPage.returned_count}`
+                    : ""}
+                </span>
+                <button
+                  disabled={previewLoading || !previewPage?.has_more}
+                  onClick={() =>
+                    void loadPreview(
+                      previewConn,
+                      previewLimit,
+                      previewPage?.next_offset ?? previewOffset + previewLimit,
+                    )
+                  }
+                  className="rounded-md border border-slate-700 px-3 py-1 text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+                >
+                  {t("previewNext")}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {showForm && canWrite && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
