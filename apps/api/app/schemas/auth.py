@@ -5,12 +5,14 @@ Password hashes are never included in any response schema.
 
 import uuid
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
+
+from app.core.security import MAX_PASSWORD_LENGTH
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(max_length=MAX_PASSWORD_LENGTH)
 
 
 class TenantSelectRequest(BaseModel):

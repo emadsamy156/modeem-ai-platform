@@ -7,6 +7,7 @@ Session tokens are signed JWTs (HS256) carried in an HttpOnly cookie.
 The signing secret comes from the AUTH_SECRET environment variable.
 """
 
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -18,8 +19,53 @@ from argon2.exceptions import VerificationError, VerifyMismatchError
 from app.core.config import get_settings
 
 SESSION_COOKIE_NAME = "modeem_session"
+CSRF_COOKIE_NAME = "modeem_csrf"
+CSRF_HEADER_NAME = "X-CSRF-Token"
+
+# Reject pathological password sizes before hashing (Argon2 cost scales with input).
+MAX_PASSWORD_LENGTH = 256
+
+MIN_PRODUCTION_SECRET_LENGTH = 32
 
 _hasher = PasswordHasher()  # Argon2id by default
+
+# Pre-generated once at import so unknown-email logins still perform a full
+# Argon2 verification (mitigates user-enumeration timing). Never per-request.
+_DUMMY_HASH = _hasher.hash(secrets.token_urlsafe(32))
+
+
+def verify_dummy_password(password: str) -> None:
+    """Burn the same Argon2 work as a real verification; always 'fails'."""
+    try:
+        _hasher.verify(_DUMMY_HASH, password)
+    except (VerifyMismatchError, VerificationError, ValueError):
+        pass
+
+
+def generate_csrf_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def csrf_tokens_match(cookie_value: str, header_value: str) -> bool:
+    return secrets.compare_digest(cookie_value, header_value)
+
+
+def validate_auth_secret_for_production(environment: str, auth_secret: str) -> None:
+    """Fail clearly in production when AUTH_SECRET is missing or weak.
+
+    Never logs or includes the secret value itself.
+    """
+    if environment != "production":
+        return
+    if not auth_secret:
+        raise RuntimeError(
+            "AUTH_SECRET must be explicitly configured in production."
+        )
+    if len(auth_secret) < MIN_PRODUCTION_SECRET_LENGTH:
+        raise RuntimeError(
+            f"AUTH_SECRET must be at least {MIN_PRODUCTION_SECRET_LENGTH} "
+            "characters in production."
+        )
 
 
 def hash_password(password: str) -> str:

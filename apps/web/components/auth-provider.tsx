@@ -25,6 +25,11 @@ type AuthContextValue = {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+function csrfHeaders(): Record<string, string> {
+  const match = document.cookie.match(/(?:^|;\s*)modeem_csrf=([^;]+)/);
+  return match ? { "X-CSRF-Token": decodeURIComponent(match[1]) } : {};
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
@@ -70,7 +75,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const logout = useCallback(async () => {
-    await fetch("/backend/api/v1/auth/logout", { method: "POST", credentials: "same-origin" });
+    await fetch("/backend/api/v1/auth/logout", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: csrfHeaders(),
+    });
     setUser(null);
     router.replace("/login");
   }, [router]);
@@ -78,7 +87,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const selectTenant = useCallback(async (tenantId: string) => {
     const res = await fetch("/backend/api/v1/auth/tenant", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...csrfHeaders() },
       credentials: "same-origin",
       body: JSON.stringify({ tenant_id: tenantId }),
     });

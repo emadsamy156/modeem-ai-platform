@@ -98,10 +98,15 @@ def resolve_tenant_context(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="No active membership for this tenant",
             )
-    elif len(memberships) >= 1:
-        # Single tenant: select automatically. Multiple: default to the first
-        # (an explicit selection endpoint lets the user switch).
+    elif len(memberships) == 1:
+        # Exactly one tenant: select automatically.
         membership = memberships[0]
+    elif len(memberships) > 1:
+        # Never pick an arbitrary tenant (e.g. database row order). The user
+        # must select explicitly via POST /api/v1/auth/tenant.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Tenant selection required"
+        )
 
     if membership is not None:
         tenant = db.get(Tenant, membership.tenant_id)

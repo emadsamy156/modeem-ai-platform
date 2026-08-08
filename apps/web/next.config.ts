@@ -3,7 +3,13 @@ import path from "node:path";
 
 const nextConfig: NextConfig = {
   // Replit preview is served through a proxied iframe on a different origin.
-  allowedDevOrigins: ["*"],
+  allowedDevOrigins: [
+    "*.replit.dev",
+    "*.repl.co",
+    "127.0.0.1",
+    "localhost",
+    ...(process.env.REPLIT_DEV_DOMAIN ? [process.env.REPLIT_DEV_DOMAIN] : []),
+  ],
   outputFileTracingRoot: path.join(__dirname),
   async rewrites() {
     // Proxy API calls to the FastAPI backend so the browser stays same-origin

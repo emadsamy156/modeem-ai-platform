@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
+from app.api.csrf import clear_csrf_cookie, require_csrf, set_csrf_cookie
 from app.api.deps import (
     TenantContext,
     get_active_memberships,
@@ -18,6 +19,7 @@ from app.core.config import get_settings
 from app.core.security import (
     SESSION_COOKIE_NAME,
     create_session_token,
+    verify_dummy_password,
     verify_password,
 )
 from app.models import Tenant, User
@@ -62,7 +64,14 @@ def login(
         status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password"
     )
 
-    if user is None or not verify_password(user.password_hash, body.password):
+    if user is None:
+        # Perform equivalent Argon2 work to avoid user-enumeration timing.
+        verify_dummy_password(body.password)
+        credentials_ok = False
+    else:
+        credentials_ok = verify_password(user.password_hash, body.password)
+
+    if user is None or not credentials_ok:
         record_audit(
             db,
             action="auth.login_failed",
@@ -85,11 +94,14 @@ def login(
         raise generic_error
 
     memberships = get_active_memberships(db, user)
-    tenant_id = memberships[0].tenant_id if memberships else None
+    # Exactly one membership: auto-select. Multiple: leave the tenant unset
+    # until the user selects one explicitly (never rely on row order).
+    tenant_id = memberships[0].tenant_id if len(memberships) == 1 else None
 
     user.last_login_at = datetime.now(UTC)
     token = create_session_token(user.id, tenant_id)
     _set_session_cookie(response, token)
+    set_csrf_cookie(response)
 
     record_audit(
         db,
@@ -102,7 +114,7 @@ def login(
     return _me_response(db, user, tenant_id)
 
 
-@router.post("/auth/logout")
+@router.post("/auth/logout", dependencies=[Depends(require_csrf)])
 def logout(
     request: Request,
     response: Response,
@@ -116,6 +128,7 @@ def logout(
     except HTTPException:
         pass
     response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    clear_csrf_cookie(response)
     record_audit(
         db,
         action="auth.logout",
@@ -144,7 +157,7 @@ def me(
     return _me_response(db, user, tenant_id)
 
 
-@router.post("/auth/tenant", response_model=MeResponse)
+@router.post("/auth/tenant", response_model=MeResponse, dependencies=[Depends(require_csrf)])
 def select_tenant(
     body: TenantSelectRequest,
     response: Response,

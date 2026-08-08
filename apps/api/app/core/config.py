@@ -37,6 +37,11 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()
-    if not settings.auth_secret and settings.session_secret:
+    if settings.environment != "production" and not settings.auth_secret:
+        # Development convenience only; production requires explicit AUTH_SECRET.
         settings.auth_secret = settings.session_secret
+
+    from app.core.security import validate_auth_secret_for_production
+
+    validate_auth_secret_for_production(settings.environment, settings.auth_secret)
     return settings

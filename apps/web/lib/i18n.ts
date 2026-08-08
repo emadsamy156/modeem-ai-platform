@@ -31,6 +31,8 @@ export const dictionaries: Record<Locale, Record<string, string>> = {
     tenant: "Tenant",
     role: "Role",
     loading: "Loading…",
+    selectTenantTitle: "Select a workspace",
+    selectTenantSubtitle: "You belong to multiple tenants. Choose one to continue.",
   },
   ar: {
     appName: "منصة مديم للذكاء الاصطناعي",
@@ -62,6 +64,8 @@ export const dictionaries: Record<Locale, Record<string, string>> = {
     tenant: "المستأجر",
     role: "الدور",
     loading: "جارٍ التحميل…",
+    selectTenantTitle: "اختر مساحة العمل",
+    selectTenantSubtitle: "أنت عضو في أكثر من مستأجر. اختر واحداً للمتابعة.",
   },
 };
 

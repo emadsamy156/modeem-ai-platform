@@ -110,6 +110,11 @@ def _login(client: TestClient, email: str, password: str = PASSWORD):
     return client.post("/api/v1/auth/login", json={"email": email, "password": password})
 
 
+def _csrf(client: TestClient) -> dict[str, str]:
+    token = client.cookies.get("modeem_csrf")
+    return {"X-CSRF-Token": token} if token else {}
+
+
 def test_correct_password_login_succeeds(seed):
     client = _client()
     res = _login(client, "a@example.com")
@@ -144,7 +149,11 @@ def test_protected_api_rejects_unauthenticated(seed):
 def test_tenant_a_user_cannot_access_tenant_b(seed):
     client = _client()
     _login(client, "a@example.com")
-    res = client.post("/api/v1/auth/tenant", json={"tenant_id": str(seed["tenant_b"])})
+    res = client.post(
+        "/api/v1/auth/tenant",
+        json={"tenant_id": str(seed["tenant_b"])},
+        headers=_csrf(client),
+    )
     assert res.status_code == 403
 
 
@@ -178,7 +187,7 @@ def test_logout_invalidates_browser_auth(seed):
     client = _client()
     _login(client, "a@example.com")
     assert client.get("/api/v1/auth/me").status_code == 200
-    res = client.post("/api/v1/auth/logout")
+    res = client.post("/api/v1/auth/logout", headers=_csrf(client))
     assert res.status_code == 200
     assert client.get("/api/v1/auth/me").status_code == 401
 
@@ -209,7 +218,9 @@ def test_tenant_uuid_manipulation_cannot_bypass_membership(seed):
     _login(client, "a@example.com")
     # Try switching to a random UUID and to tenant B directly.
     for tid in (uuid.uuid4(), seed["tenant_b"]):
-        res = client.post("/api/v1/auth/tenant", json={"tenant_id": str(tid)})
+        res = client.post(
+            "/api/v1/auth/tenant", json={"tenant_id": str(tid)}, headers=_csrf(client)
+        )
         assert res.status_code == 403
     # Context is still tenant A.
     res = client.get("/api/v1/tenant-context")
